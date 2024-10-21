@@ -67,41 +67,16 @@ class IDVerificationTests(TestCase):
             self.url,
             {
                 'front_id_image': self.front_id_image,
-                'back_id_image': self.back_id_image
+                'back_id_image': self.back_id_image,
+                'freelancer_id':self.freelancer_id
+                
             },
             format='multipart'
         )
 
         # Assertions
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('authenticity_score', response.data)
-        self.assertIn('details', response.data)
-        
-        # Check the authenticity score is within expected range
-        self.assertTrue(0 <= response.data['authenticity_score'] <= 100)
-        
-        # Check details
-        details = response.data['details']
-        self.assertIn('ELA_Tampered', details)
-        self.assertIn('ELA_Score', details)
-        self.assertIn('Clone_Detected', details)
-        self.assertIn('Clone_Count', details)
-        self.assertIn('Forgery_Detected', details)
-        self.assertIn('Forgery_Confidence', details)
-        self.assertIn('Anomaly_Detected', details)
-        self.assertIn('MSE', details)
-        self.assertIn('Personal_Info_Match', details)
-        
-        personal_info = details['Personal_Info_Match']
-        self.assertIn('Is_Match', personal_info)
-        self.assertIn('Match_Percentage', personal_info)
-        self.assertIn('Match_Score', personal_info)
-        self.assertIn('Total_Fields', personal_info)
-        self.assertIn('Mismatches', personal_info)
-        
-        # Optionally, further assertions based on expected values
-        # For example:
-        # self.assertGreaterEqual(details['authenticity_score'], 75)
+        self.assertEqual(response.data['status'],'success')
     def test_verify_passport_success(self):
         """
         Test the successful verification of an passport with all steps passing.
@@ -111,33 +86,16 @@ class IDVerificationTests(TestCase):
         response = self.client.post(
             self.pass_url,
             {
-                'passport_image': self.passport_image
+                'passport_image': self.passport_image,
+                'freelancer_id':self.freelancer_id
             },
             format='multipart'
         )
 
         # Assertions
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('authenticity_score', response.data)
-        self.assertIn('details', response.data)
-        
-        # Check the authenticity score is within expected range
-        self.assertTrue(0 <= response.data['authenticity_score'] <= 100)
-        
-        # Check details
-        details = response.data['details']
-        self.assertIn('ELA_Tampered', details)
-        self.assertIn('ELA_Score', details)
-        self.assertIn('Clone_Detected', details)
-        self.assertIn('Clone_Count', details)
-        self.assertIn('Forgery_Detected', details)
-        self.assertIn('Forgery_Confidence', details)
-        self.assertIn('Anomaly_Detected', details)
-        self.assertIn('MSE', details)  
-        # Optionally, further assertions based on expected values
-        # For example:
-        # self.assertGreaterEqual(details['authenticity_score'], 75)
-    
+        self.assertEqual(response.data['status'],'success')
+
     def test_verify_id_model_loading_failure(self):
         """
         Test handling of model loading failures.
@@ -159,7 +117,8 @@ class IDVerificationTests(TestCase):
             self.url,
             {
                 'front_id_image': self.front_id_image,
-                'back_id_image': self.back_id_image
+                'back_id_image': self.back_id_image,
+                'freelancer_id':self.freelancer_id
             },
             format='multipart'
             )
@@ -173,13 +132,3 @@ class IDVerificationTests(TestCase):
             # Restore the original model files
             os.rename(backup_forgery_model, original_forgery_model)
             os.rename(backup_autoencoder_model, original_autoencoder_model)
-    # def tearDown(self):
-    #     """
-    #     Clean up any files created during tests.
-    #     """
-    #     upload_dir = os.path.join(settings.MEDIA_ROOT, 'uploads')
-    #     if os.path.exists(upload_dir):
-    #         for filename in os.listdir(upload_dir):
-    #             file_path = os.path.join(upload_dir, filename)
-    #             if os.path.isfile(file_path):
-    #                 os.remove(file_path)

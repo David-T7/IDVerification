@@ -1,4 +1,3 @@
-# Dockerfile
 FROM python:3.11-slim
 LABEL maintainer="Dawit"
 ENV PYTHONUNBUFFERED 1
@@ -9,13 +8,14 @@ COPY ./app /app
 WORKDIR /app
 EXPOSE 8005
 
+# Install dependencies
 RUN apt-get update && \
     apt-get install -y \
     git \
     libglib2.0-0 \
     tesseract-ocr \
-    ffmpeg \ 
-    libsm6 \ 
+    ffmpeg \
+    libsm6 \
     libxext6 \
     libgl1-mesa-glx \
     postgresql-client \
@@ -31,7 +31,9 @@ RUN apt-get update && \
     chown -R django-user:django-user /vol && \
     chmod -R 755 /vol
 
-
+# Create a directory for DeepFace data
+RUN mkdir -p /app/deepface_data && \
+    chown -R django-user:django-user /app/deepface_data
 
 # Clone ZXing C++ repository
 RUN git config --global http.postBuffer 157286400
@@ -44,4 +46,5 @@ RUN mkdir /opt/zxing-cpp/build && \
     cmake --build . --target install -- -j8 && \
     rm -rf /opt/zxing-cpp
 
+# Set the user for running the application
 USER django-user

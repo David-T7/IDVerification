@@ -9,6 +9,16 @@ import pytesseract
 from PIL import Image as PIL
 import zxingcpp
 import os
+import face_recognition
+
+import os
+os.environ['DEEPFACE_HOME'] = '/vol/web/deepface'
+
+
+from deepface import DeepFace
+import dlib
+from imutils import face_utils
+
 def detect_template(image_path, template_path, threshold=0.8):
     image = cv2.imread(image_path, 0)
     template = cv2.imread(template_path, 0)
@@ -607,3 +617,247 @@ def parse_mrz_date(date_str):
         return datetime.strptime(date_str, '%y%m%d').date()
     except ValueError:
         return "Invalid Date"
+    
+
+def load_face_encoding(image_path):
+    """
+    Loads an image and returns the face encoding.
+    """
+    image = face_recognition.load_image_file(image_path)
+    encodings = face_recognition.face_encodings(image)
+    
+    if not encodings:
+        raise ValueError(f"No faces found in the image: {image_path}")
+    
+    return encodings[0]
+
+
+def compare_faces(known_encoding, unknown_encoding, tolerance=0.6):
+    """
+    Compares two face encodings and returns whether they match and the distance.
+    """
+    results = face_recognition.compare_faces([known_encoding], unknown_encoding, tolerance)
+    distance = face_recognition.face_distance([known_encoding], unknown_encoding)[0]
+    return results[0], distance
+
+def detect_smile(image_path):
+    """
+    Analyzes the image and returns the dominant emotion.
+    """
+    try:
+        # Perform the emotion analysis
+        analysis = DeepFace.analyze(img_path=image_path, actions=['emotion'], enforce_detection=True)
+        
+        # Check if the result is a list (multiple faces detected)
+        if isinstance(analysis, list):
+            # Assuming you want to process the first face found
+            analysis = analysis[0]  
+
+        # Return the dominant emotion
+        return analysis['dominant_emotion']
+    
+    except Exception as e:
+        raise ValueError(f"Error in emotion analysis: {str(e)}")
+
+
+
+def get_right_head_pose(image, predictor_path, mmod_model_path):
+    detector = dlib.cnn_face_detection_model_v1(mmod_model_path)
+    predictor = dlib.shape_predictor(predictor_path)
+
+    if image is None:
+        raise ValueError("Input image is None or could not be read.")
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    detections = detector(image, 1)
+    
+    print(f"Number of faces detected: {len(detections)}")
+
+    if len(detections) == 0:
+        raise ValueError("No faces detected for head pose estimation.")
+
+    rect = detections[0].rect
+    shape = predictor(gray, rect)
+    shape = face_utils.shape_to_np(shape)
+
+    model_points = np.array([
+    (0.0, 0.0, 0.0),              # Nose tip
+    (0.0, -300.0, -65.0),         # Chin (adjusted slightly)
+    (-175.0, 150.0, -135.0),      # Left eye left corner (adjusted for symmetry)
+    (175.0, 150.0, -135.0),       # Right eye right corner
+    (-125.0, -125.0, -125.0),     # Left Mouth corner
+    (125.0, -125.0, -125.0)       # Right mouth corner
+    ], dtype=np.float64)
+
+    image_points = np.array([
+        shape[30],  # Nose tip
+        shape[8],   # Chin
+        shape[36],  # Left eye left corner
+        shape[45],  # Right eye right corner
+        shape[48],  # Left mouth corner
+        shape[54]   # Right mouth corner
+    ], dtype=np.float64)
+
+    size = image.shape
+    focal_length = size[1] * 1.2  # Fine-tuned focal length
+    center = (size[1] / 2, size[0] / 2)
+    camera_matrix = np.array([
+        [focal_length, 0, center[0]],
+        [0, focal_length, center[1]],
+        [0, 0, 1]
+    ], dtype=np.float64)
+
+    dist_coeffs = np.zeros((4, 1))
+
+    success, rotation_vector, translation_vector = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
+
+    if not success:
+        raise ValueError("Head pose estimation failed.")
+
+    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+    pose_matrix = np.hstack((rotation_matrix, translation_vector))
+    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(pose_matrix)
+
+    yaw = euler_angles[1][0]
+    pitch = euler_angles[0][0]
+    roll = euler_angles[2][0]    
+    return yaw, pitch, roll
+
+
+
+def get_left_head_pose(image, predictor_path, mmod_model_path):
+    detector = dlib.cnn_face_detection_model_v1(mmod_model_path)
+    predictor = dlib.shape_predictor(predictor_path)
+
+    if image is None:
+        raise ValueError("Input image is None or could not be read.")
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    detections = detector(image, 1)
+    
+    print(f"Number of faces detected: {len(detections)}")
+
+    if len(detections) == 0:
+        raise ValueError("No faces detected for head pose estimation.")
+
+    rect = detections[0].rect
+    shape = predictor(gray, rect)
+    shape = face_utils.shape_to_np(shape)
+
+    model_points = np.array([
+        (0.0, 0.0, 0.0),              # Nose tip
+        (0.0, -330.0, -65.0),         # Chin
+        (-200.0, 170.0, -135.0),      # Left eye left corner (symmetrically adjusted)
+        (200.0, 170.0, -135.0),       # Right eye right corner
+        (-200.0, -170.0, -65.0),     # Left Mouth corner
+        (150.0, -150.0, -125.0)       # Right mouth corner
+    ], dtype=np.float64)
+
+    image_points = np.array([
+        shape[30],  # Nose tip
+        shape[8],   # Chin
+        shape[36],  # Left eye left corner
+        shape[45],  # Right eye right corner
+        shape[48],  # Left mouth corner
+        shape[54]   # Right mouth corner
+    ], dtype=np.float64)
+
+    size = image.shape
+    focal_length = size[1] * 1.3  # Fine-tuned focal length
+    center = (size[1] / 2, size[0] / 2)
+    camera_matrix = np.array([
+        [focal_length, 0, center[0]],
+        [0, focal_length, center[1]],
+        [0, 0, 1]
+    ], dtype=np.float64)
+
+    dist_coeffs = np.zeros((4, 1))
+
+    success, rotation_vector, translation_vector = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
+
+    if not success:
+        raise ValueError("Head pose estimation failed.")
+
+    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+    pose_matrix = np.hstack((rotation_matrix, translation_vector))
+    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(pose_matrix)
+
+    yaw = euler_angles[1][0]
+    pitch = euler_angles[0][0]
+    roll = euler_angles[2][0]
+    
+    return yaw, pitch, roll
+
+from django.conf import settings
+
+
+def detect_left_head_rotation(image_path, predictor_path="shape_predictor_68_face_landmarks.dat", yaw_threshold=20):
+    """
+    Detects if the head is rotated to the left beyond the specified yaw threshold.
+    Returns a tuple indicating (rotated_left: bool).
+    """
+    try:
+        
+        predictor_path = os.path.join(settings.BASE_DIR, 'files', 'shape_predictor_68_face_landmarks.dat')
+        mmod_model_path = os.path.join(settings.BASE_DIR, 'files', 'mmod_human_face_detector.dat')
+        
+        # Read the image from the InMemoryUploadedFile
+        img_array = np.frombuffer(image_path.read(), np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        if image is None:
+            raise ValueError("Error in image decoding. Please check the uploaded image.")
+
+        # Resize the image to reduce resource usage
+        max_height = 480  # Adjust based on your requirements
+        max_width = 640   # Adjust based on your requirements
+
+        height, width = image.shape[:2]
+        if height > max_height or width > max_width:
+            scale = min(max_width / width, max_height / height)
+            new_size = (int(width * scale), int(height * scale))
+            image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+
+        yaw, pitch, roll = get_left_head_pose(image, predictor_path, mmod_model_path)
+        print(f"Yaw: {yaw:.2f}, Pitch: {pitch:.2f}, Roll: {roll:.2f}")
+        
+        rotated_left = yaw < -yaw_threshold
+        
+        return rotated_left
+    except Exception as e:
+        raise ValueError(f"Error in head rotation detection: {str(e)}")
+
+def detect_right_head_rotation(image_path, predictor_path="shape_predictor_68_face_landmarks.dat", yaw_threshold=20):
+    """
+    Detects if the head is rotated to the right beyond the specified yaw threshold.
+    Returns a tuple indicating (rotated_right: bool).
+    """
+    try:
+        predictor_path = os.path.join(settings.BASE_DIR, 'files', 'shape_predictor_68_face_landmarks.dat')
+        mmod_model_path = os.path.join(settings.BASE_DIR, 'files', 'mmod_human_face_detector.dat')
+        
+        # Read the image from the InMemoryUploadedFile
+        img_array = np.frombuffer(image_path.read(), np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        if image is None:
+            raise ValueError("Error in image decoding. Please check the uploaded image.")
+
+        # Resize the image to reduce resource usage
+        max_height = 480  # Adjust based on your requirements
+        max_width = 640   # Adjust based on your requirements
+
+        height, width = image.shape[:2]
+        if height > max_height or width > max_width:
+            scale = min(max_width / width, max_height / height)
+            new_size = (int(width * scale), int(height * scale))
+            image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+
+        yaw, pitch, roll = get_right_head_pose(image, predictor_path, mmod_model_path)
+        print(f"Yaw: {yaw:.2f}, Pitch: {pitch:.2f}, Roll: {roll:.2f}")
+
+        rotated_right = yaw > yaw_threshold
+        
+        return rotated_right
+    except Exception as e:
+        raise ValueError(f"Error in head rotation detection: {str(e)}")
