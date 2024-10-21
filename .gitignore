@@ -161,3 +161,4 @@ cython_debug/
 
 #large files
 app/models/
+app/files/
