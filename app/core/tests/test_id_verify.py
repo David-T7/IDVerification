@@ -68,11 +68,14 @@ class IDVerificationTests(TestCase):
             {
                 'front_id_image': self.front_id_image,
                 'back_id_image': self.back_id_image,
-                'freelancer_id':self.freelancer_id
+                'freelancer_id':self.freelancer_id,
+                'full_name':'Aberash Mulugeta'
+
                 
             },
             format='multipart'
         )
+        print("response data is",response.data)
 
         # Assertions
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -87,10 +90,12 @@ class IDVerificationTests(TestCase):
             self.pass_url,
             {
                 'passport_image': self.passport_image,
-                'freelancer_id':self.freelancer_id
+                'freelancer_id':self.freelancer_id,
+                'full_name':'Dawit Tesfaye'
             },
             format='multipart'
         )
+        print("passport response data is",response.data)
 
         # Assertions
         self.assertEqual(response.status_code, status.HTTP_200_OK)

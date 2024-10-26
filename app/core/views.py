@@ -1,5 +1,6 @@
 # app/verification/views.py
 
+from io import BytesIO
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -11,6 +12,8 @@ from .models import UserImage  # Ensure this import is correct
 import cv2
 import numpy as np
 from django.core.exceptions import ObjectDoesNotExist
+import difflib
+from PIL import Image
 
 from .utils import (
     preprocess_image,
@@ -28,7 +31,8 @@ from .utils import (
     load_face_encoding, compare_faces, 
     detect_smile, 
     detect_left_head_rotation ,
-    detect_right_head_rotation
+    detect_right_head_rotation ,
+    extract_first_and_middle_name
 )
 
 import tensorflow as tf
@@ -47,7 +51,8 @@ class VerifyIDView(APIView):
             id_front_image = serializer.validated_data['front_id_image']
             id_back_image = serializer.validated_data['back_id_image']
             freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-            
+            full_name = request.data.get('full_name')  # Get freelancer UUID from the request
+
             # Define paths and ensure directories exist
             id_front_upload_path = os.path.join(settings.MEDIA_ROOT, 'images/government_id', f"front_{id_front_image.name}")
             id_back_upload_path = os.path.join(settings.MEDIA_ROOT, 'images/government_id', f"back_{id_back_image.name}")
@@ -99,6 +104,19 @@ class VerifyIDView(APIView):
                 # OCR Text Extraction and Parsing
                 ocr_text = extract_text_from_image(id_front_upload_path, preprocess=True)
                 ocr_data_dict = parse_extracted_text(ocr_text)
+                ocr_first_middle = extract_first_and_middle_name(ocr_data_dict["Full_Name"])
+                request_first_middle = extract_first_and_middle_name(full_name)
+
+                # Normalize by removing spaces and converting to lowercase
+                normalized_ocr_name = ocr_first_middle.replace(" ", "").strip().lower()
+                normalized_request_name = request_first_middle.replace(" ", "").strip().lower()
+
+                # Calculate the similarity ratio using difflib
+                similarity_score = difflib.SequenceMatcher(None, normalized_ocr_name, normalized_request_name).ratio() * 100
+                name_match_threshold = 85  # Define the acceptable threshold for name matching
+                print("name similarity score is",similarity_score)
+                if similarity_score < name_match_threshold:
+                    return Response({"error": "Full name does not much with the provided document!."}, status=status.HTTP_400_BAD_REQUEST)
 
                 # Personal Information Matching
                 match_score, total_fields, mismatches = match_personal_info(barcode_data_dict, ocr_data_dict)
@@ -165,7 +183,7 @@ class VerifyPassportView(APIView):
         if serializer.is_valid():
             passport_image = serializer.validated_data['passport_image']
             freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-
+            full_name = request.data.get('full_name')  # Get freelancer UUID from the request
             # Define paths and ensure directories exist
             passport_image_upload_path = os.path.join(settings.MEDIA_ROOT, 'images/passport', f"{passport_image.name}")
             passport_template_path = os.path.join(settings.MEDIA_ROOT, 'images/passport',"passport_template.jpg")
@@ -214,11 +232,22 @@ class VerifyPassportView(APIView):
 
                 # Parse MRZ data
                 parsed_mrz = parse_mrz_data(mrz_data)
-
                 # Step 2: Preprocess Image (optional based on requirements)
                 # Implement if needed
+                if not full_name:
+                    return Response({"error": "Full name is required for comparison."}, status=status.HTTP_400_BAD_REQUEST)
+                parsed_first_middle_name = extract_first_and_middle_name(parsed_mrz['Names'])
+                request_first_middle = extract_first_and_middle_name(full_name)
+                # Normalize names by removing all spaces and converting to lowercase
+                normalized_full_name_request = request_first_middle.replace(" ", "").strip().lower()
+                normalized_mrz_names = parsed_first_middle_name.replace(" ", "").strip().lower()
 
-                # Step 3: Perform Forgery Detection Techniques
+                # Step 4: Fuzzy name comparison using difflib's SequenceMatcher
+                similarity_score = difflib.SequenceMatcher(None, normalized_full_name_request, normalized_mrz_names).ratio() * 100
+                name_match_threshold = 85  # Define the acceptable threshold for name matching
+                print("name similarity score is",similarity_score)
+                if similarity_score <  name_match_threshold:
+                    return Response({"error": "Full name does not much with the provided document!."}, status=status.HTTP_400_BAD_REQUEST)
 
                 # 3a. Error Level Analysis (ELA)
                 ela_tampered, ela_score = perform_ela(passport_image_upload_path, threshold=10)
@@ -289,49 +318,45 @@ class FaceMatchingView(APIView):
     authentication_classes = [CustomJWTAuthentication]
    
     def post(self, request, *args, **kwargs):
-        serializer = BiometricImageUploadSerializer(data=request.data)
-        if serializer.is_valid():
-            id_image = request.FILES.get('id_image')
             user_image = request.FILES.get('user_image')
             freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-
-            if not id_image or not user_image:
-                return Response({"error": "ID image and user image are required."}, status=status.HTTP_400_BAD_REQUEST)
+            print("freelancer image is ",user_image)
+            print("freelance id is",freelancer_id)
 
             if not freelancer_id:
                 return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
-
+            elif not user_image:
+                return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
             try:
+                user_image_instance = UserImage.objects.filter(freelancer_id=freelancer_id).last()
+                # Convert `user_image` to a byte stream for `load_face_encoding`
+                new_user_image = BytesIO()
+                img = Image.open(user_image)
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
+                img.save(new_user_image, format='JPEG')
+                new_user_image.seek(0)
                 # Load and compare face encodings
-                known_encoding = load_face_encoding(id_image)
-                unknown_encoding = load_face_encoding(user_image)
+                print("user image object found in the database")
+                known_encoding = load_face_encoding(user_image_instance.id_image)
+                print("face encoding for known worked....")
+                unknown_encoding = load_face_encoding(new_user_image)
+                print("face encoding for unknown worked....")
+              
+                print("mtaching....")
                 match, distance = compare_faces(known_encoding, unknown_encoding)
 
                 if not match:
                     return Response({"status": "failed", "message": f"Face mismatch. Distance: {distance:.4f}"}, status=status.HTTP_200_OK)
-                
-                user_image_instance, created = UserImage.objects.get_or_create(
-                        freelancer_id=freelancer_id,
-                        defaults={
-                            'user_image': user_image,  # Assuming the front ID image is used as user_image
-                        }
-                    )
-
-                # If the instance already exists, update the images
-                if not created:
-                        user_image_instance.user_image = user_image
-                        user_image_instance.save()
-                
+                 
                 return Response({
                     "status": "success", 
                     "message": "Face match successful.",
-                    "user_image_id": str(user_image_instance.id)  # Return the created UserImage ID
                 }, status=status.HTTP_200_OK)
 
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 def match_faces(freelancer_id, new_image):
     """
@@ -366,20 +391,27 @@ class SmileDetectionView(APIView):
     authentication_classes = [CustomJWTAuthentication]
 
     def post(self, request, *args, **kwargs):
-        serializer = BiometricImageUploadSerializer(data=request.data)
-        if serializer.is_valid():
             user_image = request.FILES.get('user_image')
             freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
 
-            if not user_image:
+            if not freelancer_id:
+                return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
+            elif not user_image:
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
-            match = match_faces(freelancer_id , user_image)
+            new_user_image = BytesIO()
+            img = Image.open(user_image)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            img.save(new_user_image, format='JPEG')
+            new_user_image.seek(0)
+
+            match = match_faces(freelancer_id , new_user_image)
             if not match:
                 return Response({"status": "failed", "message": "Image does not match with the previous id image uploaded"}, status=status.HTTP_200_OK)
 
             try:
                 # Convert the InMemoryUploadedFile to a NumPy array
-                img_array = np.frombuffer(user_image.read(), np.uint8)
+                img_array = np.frombuffer(new_user_image.read(), np.uint8)
                 img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
                 if img is None:
@@ -397,7 +429,6 @@ class SmileDetectionView(APIView):
             except Exception as e:
                 print(f"Error during smile detection: {e}")
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
 
 
@@ -406,24 +437,29 @@ class HeadRotationRightView(APIView):
     authentication_classes = [CustomJWTAuthentication]
 
     def post(self, request, *args, **kwargs):
-        serializer = BiometricImageUploadSerializer(data=request.data)
-        if serializer.is_valid():
             user_image = request.FILES.get('user_image')
             freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-            match = match_faces(freelancer_id , user_image)
+            if not freelancer_id:
+                return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
+            elif not user_image:
+                return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
+            new_user_image = BytesIO()
+            img = Image.open(user_image)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            img.save(new_user_image, format='JPEG')
+            new_user_image.seek(0)
+            match = match_faces(freelancer_id , new_user_image)
             if not match:
                 return Response({"status": "failed", "message": "Image does not match with the previous id image uploaded"}, status=status.HTTP_200_OK)
-            
-            yaw_threshold = request.data.get('yaw_threshold', 20)
-            print(f"Type of user_image: {type(user_image)}")
-            print(f"Contents of user_image: {user_image}")
-
-            if not user_image:
-                return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
+        
+            yaw_threshold = request.data.get('yaw_threshold', 15)
+            print(f"Type of user_image: {type(new_user_image)}")
+            print(f"Contents of user_image: {new_user_image}")
 
             try:
                 # Detect head rotation in the user's image
-                rotated_right = detect_right_head_rotation(user_image, yaw_threshold=float(yaw_threshold))
+                rotated_right = detect_right_head_rotation(new_user_image, yaw_threshold=float(yaw_threshold))
 
                 if not rotated_right:
                     return Response({"status": "failed", "message": "Head rotation requirement not met. Please rotate your head to the right."}, status=status.HTTP_200_OK)
@@ -432,7 +468,6 @@ class HeadRotationRightView(APIView):
 
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 
@@ -441,21 +476,29 @@ class HeadRotationLeftView(APIView):
     authentication_classes = [CustomJWTAuthentication]
 
     def post(self, request, *args, **kwargs):
-        serializer = BiometricImageUploadSerializer(data=request.data)
-        if serializer.is_valid():
             user_image = request.FILES.get('user_image')
             freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-            match = match_faces(freelancer_id , user_image)
+            if not freelancer_id:
+                return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
+            elif not user_image:
+                return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
+            new_user_image = BytesIO()
+            img = Image.open(user_image)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            img.save(new_user_image, format='JPEG')
+            new_user_image.seek(0)
+            match = match_faces(freelancer_id , new_user_image)
             if not match:
                 return Response({"status": "failed", "message": "Image does not match with the previous id image uploaded"}, status=status.HTTP_200_OK)
-            yaw_threshold = request.data.get('yaw_threshold', 20)
+            yaw_threshold = request.data.get('yaw_threshold', 15)
+            print(f"Type of user_image: {type(new_user_image)}")
+            print(f"Contents of user_image: {new_user_image}")
 
-            if not user_image:
-                return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
 
             try:
                 # Detect head rotation in the user's image
-                rotated_left = detect_left_head_rotation(user_image, yaw_threshold=float(yaw_threshold))
+                rotated_left = detect_left_head_rotation(new_user_image, yaw_threshold=float(yaw_threshold))
 
                 if not rotated_left:
                     return Response({"status": "failed", "message": "Head rotation requirement not met. Please rotate your head to the left."}, status=status.HTTP_200_OK)
@@ -464,4 +507,4 @@ class HeadRotationLeftView(APIView):
 
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        

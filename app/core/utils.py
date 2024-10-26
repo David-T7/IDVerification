@@ -497,6 +497,20 @@ def parse_barcode_text(barcode_text):
     
     return info_dict
 
+def extract_first_and_middle_name(full_name):
+    """
+    Extract only the first and last name from the full name.
+    
+    Parameters:
+    - full_name: A string containing the full name.
+    
+    Returns:
+    - first_last_name: A string containing only the first and last name.
+    """
+    name_parts = full_name.split()
+    if len(name_parts) < 2:
+        return full_name.strip()  # If only one name is present, return as is.
+    return f"{name_parts[0]} {name_parts[1]}"  # Return first and last name
 
 
 def parse_extracted_text(extracted_text):

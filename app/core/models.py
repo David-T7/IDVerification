@@ -10,4 +10,4 @@ class UserImage(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)  # Timestamp for when the image was uploaded
 
     def __str__(self):
-        return f"Image {self.id} for Freelancer {self.freelancer_uuid}"
+        return f"Image {self.id} for Freelancer {self.freelancer_id}"
