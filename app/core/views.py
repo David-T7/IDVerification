@@ -14,6 +14,7 @@ import numpy as np
 from django.core.exceptions import ObjectDoesNotExist
 import difflib
 from PIL import Image
+from django.shortcuts import get_object_or_404
 
 from .utils import (
     preprocess_image,
@@ -508,3 +509,29 @@ class HeadRotationLeftView(APIView):
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
+
+
+class UpdateUserImageView(APIView):
+    permission_classes = [TokenPayloadPermission]
+    authentication_classes = [CustomJWTAuthentication]
+
+    def patch(self, request, *args, **kwargs):
+        freelancer_id = request.data.get("freelancer_id")
+        user_image = request.FILES.get("user_image")
+
+        if not freelancer_id:
+            return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not user_image:
+            return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fetch the freelancer's existing image record
+        user_image_instance = get_object_or_404(UserImage, freelancer_id=freelancer_id)
+
+        # Update the user image
+        user_image_instance.user_image = user_image
+        user_image_instance.save()
+
+        return Response(
+            {"status": "success", "message": "Profile picture updated successfully."},
+            status=status.HTTP_200_OK,
+        )
