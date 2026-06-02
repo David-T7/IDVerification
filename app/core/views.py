@@ -33,7 +33,12 @@ from .utils import (
     detect_smile, 
     detect_left_head_rotation ,
     detect_right_head_rotation ,
-    extract_first_and_middle_name
+    extract_first_and_middle_name,
+    prepare_uploaded_image_bytes,
+    verify_live_face_matches_id,
+    _load_bgr_image,
+    warm_up_liveness_models,
+    _get_id_face_encoding,
 )
 
 import tensorflow as tf
@@ -217,8 +222,10 @@ class VerifyPassportView(APIView):
                 # Step 1: Extract MRZ Data
                 mrz = read_mrz(passport_image_upload_path)
                 if mrz is None:
-                    print("MRZ could not be read from the image.")
-                    return
+                    return Response(
+                        {"error": "Could not read passport MRZ. Upload a clear photo of the bio page."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 mrz_data = mrz.to_dict()
                 
                 # Validate MRZ check digits
@@ -330,19 +337,21 @@ class FaceMatchingView(APIView):
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
             try:
                 user_image_instance = UserImage.objects.filter(freelancer_id=freelancer_id).last()
-                # Convert `user_image` to a byte stream for `load_face_encoding`
+                if not user_image_instance or not user_image_instance.id_image:
+                    return Response(
+                        {"error": "No ID image on file. Complete document upload first."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 new_user_image = BytesIO()
                 img = Image.open(user_image)
                 if img.mode == 'RGBA':
                     img = img.convert('RGB')
                 img.save(new_user_image, format='JPEG')
                 new_user_image.seek(0)
-                # Load and compare face encodings
-                print("user image object found in the database")
-                known_encoding = load_face_encoding(user_image_instance.id_image)
-                print("face encoding for known worked....")
+                known_encoding = _get_id_face_encoding(freelancer_id)
+                if known_encoding is None:
+                    known_encoding = load_face_encoding(user_image_instance.id_image)
                 unknown_encoding = load_face_encoding(new_user_image)
-                print("face encoding for unknown worked....")
               
                 print("mtaching....")
                 match, distance = compare_faces(known_encoding, unknown_encoding)
@@ -360,31 +369,12 @@ class FaceMatchingView(APIView):
         
 
 def match_faces(freelancer_id, new_image):
-    """
-    Matches a face from an a new user image with the face stored in the UserImage model.
-
-    Parameters:
-    - freelancer_id: UUID of the freelancer to retrieve the user image.
-    - new_image: The uploaded image file.
-
-    Returns:
-    - A dictionary with the status and message.
-    """
-    try:
-        # Retrieve the user image from the database based on the freelancer_id
-        user_image_instance = UserImage.objects.get(freelancer_uuid=freelancer_id)
-        user_image = user_image_instance.user_image  # Get the user image from the instance
-
-        # Load and compare face encodings
-        known_encoding = load_face_encoding(new_image)  # ID image to match against
-        unknown_encoding = load_face_encoding(user_image)  # User image from the model
-
-        match, distance = compare_faces(known_encoding, unknown_encoding)
-        return match
-    except ObjectDoesNotExist:
-        return {"status": "failed", "message": "Freelancer UUID does not exist."}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    """Compare a live frame to the ID photo on file."""
+    if isinstance(new_image, bytes):
+        return verify_live_face_matches_id(freelancer_id, new_image)
+    if hasattr(new_image, 'seek'):
+        new_image.seek(0)
+    return verify_live_face_matches_id(freelancer_id, new_image.read())
 
 
 class SmileDetectionView(APIView):
@@ -399,28 +389,13 @@ class SmileDetectionView(APIView):
                 return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
             elif not user_image:
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
-            new_user_image = BytesIO()
-            img = Image.open(user_image)
-            if img.mode == 'RGBA':
-                img = img.convert('RGB')
-            img.save(new_user_image, format='JPEG')
-            new_user_image.seek(0)
 
-            match = match_faces(freelancer_id , new_user_image)
-            if not match:
-                return Response({"status": "failed", "message": "Image does not match with the previous id image uploaded"}, status=status.HTTP_200_OK)
+            image_bytes = prepare_uploaded_image_bytes(user_image)
 
             try:
-                # Convert the InMemoryUploadedFile to a NumPy array
-                img_array = np.frombuffer(new_user_image.read(), np.uint8)
-                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-                if img is None:
-                    return Response({"error": "Invalid image format."}, status=status.HTTP_400_BAD_REQUEST)
-
-                # Detect smile in the user's image
-                print(f"Image shape: {img.shape}")  # Log the shape of the image
-                emotion = detect_smile(img)  # Pass the NumPy array to detect_smile
+                img = _load_bgr_image(image_bytes)
+                print(f"Image shape: {img.shape}")
+                emotion = detect_smile(img)
 
                 if emotion.lower() != 'happy':
                     return Response({"status": "failed", "message": f"Required emotion 'happy' not detected. Detected emotion: '{emotion}'."}, status=status.HTTP_200_OK)
@@ -444,26 +419,21 @@ class HeadRotationRightView(APIView):
                 return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
             elif not user_image:
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
-            new_user_image = BytesIO()
-            img = Image.open(user_image)
-            if img.mode == 'RGBA':
-                img = img.convert('RGB')
-            img.save(new_user_image, format='JPEG')
-            new_user_image.seek(0)
-            match = match_faces(freelancer_id , new_user_image)
-            if not match:
-                return Response({"status": "failed", "message": "Image does not match with the previous id image uploaded"}, status=status.HTTP_200_OK)
-        
-            yaw_threshold = request.data.get('yaw_threshold', 15)
-            print(f"Type of user_image: {type(new_user_image)}")
-            print(f"Contents of user_image: {new_user_image}")
+
+            image_bytes = prepare_uploaded_image_bytes(user_image)
+            yaw_threshold = float(request.data.get('yaw_threshold', 10))
 
             try:
-                # Detect head rotation in the user's image
-                rotated_right = detect_right_head_rotation(new_user_image, yaw_threshold=float(yaw_threshold))
+                rotated_right, yaw = detect_right_head_rotation(image_bytes, yaw_threshold=yaw_threshold)
 
                 if not rotated_right:
-                    return Response({"status": "failed", "message": "Head rotation requirement not met. Please rotate your head to the right."}, status=status.HTTP_200_OK)
+                    return Response({
+                        "status": "failed",
+                        "message": (
+                            f"Turn further to your right (detected {yaw:.0f}°, need >{yaw_threshold}°). "
+                            "Keep your full face inside the circle."
+                        ),
+                    }, status=status.HTTP_200_OK)
 
                 return Response({"status": "success", "message": "Head rotation detected successfully."}, status=status.HTTP_200_OK)
 
@@ -483,26 +453,21 @@ class HeadRotationLeftView(APIView):
                 return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
             elif not user_image:
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
-            new_user_image = BytesIO()
-            img = Image.open(user_image)
-            if img.mode == 'RGBA':
-                img = img.convert('RGB')
-            img.save(new_user_image, format='JPEG')
-            new_user_image.seek(0)
-            match = match_faces(freelancer_id , new_user_image)
-            if not match:
-                return Response({"status": "failed", "message": "Image does not match with the previous id image uploaded"}, status=status.HTTP_200_OK)
-            yaw_threshold = request.data.get('yaw_threshold', 15)
-            print(f"Type of user_image: {type(new_user_image)}")
-            print(f"Contents of user_image: {new_user_image}")
 
+            image_bytes = prepare_uploaded_image_bytes(user_image)
+            yaw_threshold = float(request.data.get('yaw_threshold', 10))
 
             try:
-                # Detect head rotation in the user's image
-                rotated_left = detect_left_head_rotation(new_user_image, yaw_threshold=float(yaw_threshold))
+                rotated_left, yaw = detect_left_head_rotation(image_bytes, yaw_threshold=yaw_threshold)
 
                 if not rotated_left:
-                    return Response({"status": "failed", "message": "Head rotation requirement not met. Please rotate your head to the left."}, status=status.HTTP_200_OK)
+                    return Response({
+                        "status": "failed",
+                        "message": (
+                            f"Turn further to your left (detected {yaw:.0f}°, need <-{yaw_threshold}°). "
+                            "Keep your full face inside the circle."
+                        ),
+                    }, status=status.HTTP_200_OK)
 
                 return Response({"status": "success", "message": "Head rotation detected successfully."}, status=status.HTTP_200_OK)
 
@@ -535,3 +500,13 @@ class UpdateUserImageView(APIView):
             {"status": "success", "message": "Profile picture updated successfully."},
             status=status.HTTP_200_OK,
         )
+
+
+class WarmupView(APIView):
+    """Preload ML models so liveness checks respond quickly."""
+    permission_classes = [TokenPayloadPermission]
+    authentication_classes = [CustomJWTAuthentication]
+
+    def get(self, request):
+        warm_up_liveness_models()
+        return Response({"status": "ready", "message": "Liveness models loaded."})

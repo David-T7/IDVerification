@@ -1,4 +1,5 @@
 from datetime import datetime
+from io import BytesIO
 import re
 import cv2
 import numpy as np
@@ -654,13 +655,186 @@ def compare_faces(known_encoding, unknown_encoding, tolerance=0.6):
     distance = face_recognition.face_distance([known_encoding], unknown_encoding)[0]
     return results[0], distance
 
-def detect_smile(image_path):
+
+def prepare_uploaded_image_bytes(uploaded_file):
+    """Normalize an upload to JPEG bytes for reuse across multiple checks."""
+    img = Image.open(uploaded_file)
+    if img.mode == 'RGBA':
+        img = img.convert('RGB')
+    buffer = BytesIO()
+    img.save(buffer, format='JPEG', quality=92)
+    return buffer.getvalue()
+
+
+from django.conf import settings
+
+
+_LIVENESS_MODELS = None
+_ID_FACE_ENCODING_CACHE = {}
+
+
+def _head_pose_model_paths():
+    base = os.path.join(settings.BASE_DIR, 'files')
+    return {
+        'predictor': os.path.join(base, 'shape_predictor_68_face_landmarks.dat'),
+        'mmod': os.path.join(base, 'mmod_human_face_detector.dat'),
+    }
+
+
+def _get_liveness_models():
+    """Load dlib models once and reuse them (loading takes 30-60s on CPU)."""
+    global _LIVENESS_MODELS
+    if _LIVENESS_MODELS is not None:
+        return _LIVENESS_MODELS
+
+    paths = _head_pose_model_paths()
+    print('Loading liveness models (one-time)...')
+    _LIVENESS_MODELS = {
+        'cnn': dlib.cnn_face_detection_model_v1(paths['mmod']),
+        'predictor': dlib.shape_predictor(paths['predictor']),
+        'hog': dlib.get_frontal_face_detector(),
+    }
+    print('Liveness models ready.')
+    return _LIVENESS_MODELS
+
+
+def warm_up_liveness_models():
+    """Preload heavy ML models so the first user request is not slow."""
+    _get_liveness_models()
+
+
+def _get_id_face_encoding(freelancer_id):
+    """Cache passport/ID face encoding per candidate for this process."""
+    from .models import UserImage
+
+    cache_key = str(freelancer_id)
+    if cache_key in _ID_FACE_ENCODING_CACHE:
+        return _ID_FACE_ENCODING_CACHE[cache_key]
+
+    record = UserImage.objects.filter(freelancer_id=freelancer_id).last()
+    if not record or not record.id_image:
+        return None
+
+    encoding = load_face_encoding(record.id_image)
+    _ID_FACE_ENCODING_CACHE[cache_key] = encoding
+    return encoding
+
+
+def verify_live_face_matches_id(freelancer_id, image_bytes, tolerance=0.65):
+    """Compare a live camera frame to the passport/ID photo stored for this candidate."""
+    try:
+        known_encoding = _get_id_face_encoding(freelancer_id)
+        if known_encoding is None:
+            return False
+        unknown_encoding = load_face_encoding(BytesIO(image_bytes))
+        match, _ = compare_faces(known_encoding, unknown_encoding, tolerance=tolerance)
+        return match
+    except Exception as exc:
+        print(f"Live face match error: {exc}")
+        return False
+
+
+def _load_bgr_image(image_source, max_height=720, max_width=1280):
+    if isinstance(image_source, bytes):
+        data = image_source
+    else:
+        if hasattr(image_source, 'seek'):
+            image_source.seek(0)
+        data = image_source.read()
+
+    img_array = np.frombuffer(data, np.uint8)
+    image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Error in image decoding. Please check the uploaded image.")
+
+    height, width = image.shape[:2]
+    if height > max_height or width > max_width:
+        scale = min(max_width / width, max_height / height)
+        new_size = (int(width * scale), int(height * scale))
+        image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+    return image
+
+
+def _find_face_rect(image, gray, mmod_model_path=None):
+    """Find a face using fast HOG first, then CNN fallback for turned heads."""
+    models = _get_liveness_models()
+    hog = models['hog']
+    enhanced_gray = cv2.equalizeHist(gray)
+    for upsample in (1, 2):
+        for candidate_gray in (gray, enhanced_gray):
+            rects = hog(candidate_gray, upsample)
+            if len(rects) > 0:
+                return max(rects, key=lambda r: r.width() * r.height())
+
+    detector = models['cnn']
+    for upsample in (1,):
+        detections = detector(image, upsample)
+        if len(detections) > 0:
+            return detections[0].rect
+
+    raise ValueError("No faces detected for head pose estimation.")
+
+
+def _estimate_head_pose(image, rect, predictor_path=None):
+    predictor = _get_liveness_models()['predictor']
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    shape = predictor(gray, rect)
+    shape = face_utils.shape_to_np(shape)
+
+    model_points = np.array([
+        (0.0, 0.0, 0.0),
+        (0.0, -300.0, -65.0),
+        (-175.0, 150.0, -135.0),
+        (175.0, 150.0, -135.0),
+        (-125.0, -125.0, -125.0),
+        (125.0, -125.0, -125.0),
+    ], dtype=np.float64)
+
+    image_points = np.array([
+        shape[30],
+        shape[8],
+        shape[36],
+        shape[45],
+        shape[48],
+        shape[54],
+    ], dtype=np.float64)
+
+    size = image.shape
+    focal_length = size[1] * 1.2
+    center = (size[1] / 2, size[0] / 2)
+    camera_matrix = np.array([
+        [focal_length, 0, center[0]],
+        [0, focal_length, center[1]],
+        [0, 0, 1],
+    ], dtype=np.float64)
+    dist_coeffs = np.zeros((4, 1))
+
+    success, rotation_vector, translation_vector = cv2.solvePnP(
+        model_points, image_points, camera_matrix, dist_coeffs
+    )
+    if not success:
+        raise ValueError("Head pose estimation failed.")
+
+    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+    pose_matrix = np.hstack((rotation_matrix, translation_vector))
+    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(pose_matrix)
+
+    yaw = euler_angles[1][0]
+    pitch = euler_angles[0][0]
+    roll = euler_angles[2][0]
+    return yaw, pitch, roll
+
+def detect_smile(image):
     """
     Analyzes the image and returns the dominant emotion.
+    Accepts a BGR numpy array or file path.
     """
     try:
-        # Perform the emotion analysis
-        analysis = DeepFace.analyze(img_path=image_path, actions=['emotion'], enforce_detection=True)
+        analysis = DeepFace.analyze(
+            img_path=image,
+            actions=['emotion'],
+            enforce_detection=False,
+        )
         
         # Check if the result is a list (multiple faces detected)
         if isinstance(analysis, list):
@@ -676,133 +850,28 @@ def detect_smile(image_path):
 
 
 def get_right_head_pose(image, predictor_path, mmod_model_path):
-    detector = dlib.cnn_face_detection_model_v1(mmod_model_path)
-    predictor = dlib.shape_predictor(predictor_path)
-
     if image is None:
         raise ValueError("Input image is None or could not be read.")
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    detections = detector(image, 1)
-    
-    print(f"Number of faces detected: {len(detections)}")
-
-    if len(detections) == 0:
-        raise ValueError("No faces detected for head pose estimation.")
-
-    rect = detections[0].rect
-    shape = predictor(gray, rect)
-    shape = face_utils.shape_to_np(shape)
-
-    model_points = np.array([
-    (0.0, 0.0, 0.0),              # Nose tip
-    (0.0, -300.0, -65.0),         # Chin (adjusted slightly)
-    (-175.0, 150.0, -135.0),      # Left eye left corner (adjusted for symmetry)
-    (175.0, 150.0, -135.0),       # Right eye right corner
-    (-125.0, -125.0, -125.0),     # Left Mouth corner
-    (125.0, -125.0, -125.0)       # Right mouth corner
-    ], dtype=np.float64)
-
-    image_points = np.array([
-        shape[30],  # Nose tip
-        shape[8],   # Chin
-        shape[36],  # Left eye left corner
-        shape[45],  # Right eye right corner
-        shape[48],  # Left mouth corner
-        shape[54]   # Right mouth corner
-    ], dtype=np.float64)
-
-    size = image.shape
-    focal_length = size[1] * 1.2  # Fine-tuned focal length
-    center = (size[1] / 2, size[0] / 2)
-    camera_matrix = np.array([
-        [focal_length, 0, center[0]],
-        [0, focal_length, center[1]],
-        [0, 0, 1]
-    ], dtype=np.float64)
-
-    dist_coeffs = np.zeros((4, 1))
-
-    success, rotation_vector, translation_vector = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
-
-    if not success:
-        raise ValueError("Head pose estimation failed.")
-
-    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-    pose_matrix = np.hstack((rotation_matrix, translation_vector))
-    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(pose_matrix)
-
-    yaw = euler_angles[1][0]
-    pitch = euler_angles[0][0]
-    roll = euler_angles[2][0]    
+    rect = _find_face_rect(image, gray, mmod_model_path)
+    yaw, pitch, roll = _estimate_head_pose(image, rect, predictor_path)
+    print(f"Number of faces detected: 1")
+    print(f"Yaw: {yaw:.2f}, Pitch: {pitch:.2f}, Roll: {roll:.2f}")
     return yaw, pitch, roll
 
 
 
 def get_left_head_pose(image, predictor_path, mmod_model_path):
-    detector = dlib.cnn_face_detection_model_v1(mmod_model_path)
-    predictor = dlib.shape_predictor(predictor_path)
-
     if image is None:
         raise ValueError("Input image is None or could not be read.")
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    detections = detector(image, 1)
-    
-    print(f"Number of faces detected: {len(detections)}")
-
-    if len(detections) == 0:
-        raise ValueError("No faces detected for head pose estimation.")
-
-    rect = detections[0].rect
-    shape = predictor(gray, rect)
-    shape = face_utils.shape_to_np(shape)
-
-    model_points = np.array([
-        (0.0, 0.0, 0.0),              # Nose tip
-        (0.0, -330.0, -65.0),         # Chin
-        (-200.0, 170.0, -135.0),      # Left eye left corner (symmetrically adjusted)
-        (200.0, 170.0, -135.0),       # Right eye right corner
-        (-200.0, -170.0, -65.0),     # Left Mouth corner
-        (150.0, -150.0, -125.0)       # Right mouth corner
-    ], dtype=np.float64)
-
-    image_points = np.array([
-        shape[30],  # Nose tip
-        shape[8],   # Chin
-        shape[36],  # Left eye left corner
-        shape[45],  # Right eye right corner
-        shape[48],  # Left mouth corner
-        shape[54]   # Right mouth corner
-    ], dtype=np.float64)
-
-    size = image.shape
-    focal_length = size[1] * 1.3  # Fine-tuned focal length
-    center = (size[1] / 2, size[0] / 2)
-    camera_matrix = np.array([
-        [focal_length, 0, center[0]],
-        [0, focal_length, center[1]],
-        [0, 0, 1]
-    ], dtype=np.float64)
-
-    dist_coeffs = np.zeros((4, 1))
-
-    success, rotation_vector, translation_vector = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
-
-    if not success:
-        raise ValueError("Head pose estimation failed.")
-
-    rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-    pose_matrix = np.hstack((rotation_matrix, translation_vector))
-    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(pose_matrix)
-
-    yaw = euler_angles[1][0]
-    pitch = euler_angles[0][0]
-    roll = euler_angles[2][0]
-    
+    rect = _find_face_rect(image, gray, mmod_model_path)
+    yaw, pitch, roll = _estimate_head_pose(image, rect, predictor_path)
+    print(f"Number of faces detected: 1")
+    print(f"Yaw: {yaw:.2f}, Pitch: {pitch:.2f}, Roll: {roll:.2f}")
     return yaw, pitch, roll
-
-from django.conf import settings
 
 
 def detect_left_head_rotation(image_path, predictor_path="shape_predictor_68_face_landmarks.dat", yaw_threshold=20):
@@ -811,33 +880,12 @@ def detect_left_head_rotation(image_path, predictor_path="shape_predictor_68_fac
     Returns a tuple indicating (rotated_left: bool).
     """
     try:
-        
         predictor_path = os.path.join(settings.BASE_DIR, 'files', 'shape_predictor_68_face_landmarks.dat')
         mmod_model_path = os.path.join(settings.BASE_DIR, 'files', 'mmod_human_face_detector.dat')
-        
-        # Read the image from the InMemoryUploadedFile
-        img_array = np.frombuffer(image_path.read(), np.uint8)
-        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-        if image is None:
-            raise ValueError("Error in image decoding. Please check the uploaded image.")
-
-        # Resize the image to reduce resource usage
-        max_height = 480  # Adjust based on your requirements
-        max_width = 640   # Adjust based on your requirements
-
-        height, width = image.shape[:2]
-        if height > max_height or width > max_width:
-            scale = min(max_width / width, max_height / height)
-            new_size = (int(width * scale), int(height * scale))
-            image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
-
+        image = _load_bgr_image(image_path)
         yaw, pitch, roll = get_left_head_pose(image, predictor_path, mmod_model_path)
         print(f"Yaw: {yaw:.2f}, Pitch: {pitch:.2f}, Roll: {roll:.2f}")
-        
-        rotated_left = yaw < -yaw_threshold
-        
-        return rotated_left
+        return yaw < -yaw_threshold, yaw
     except Exception as e:
         raise ValueError(f"Error in head rotation detection: {str(e)}")
 
@@ -849,29 +897,9 @@ def detect_right_head_rotation(image_path, predictor_path="shape_predictor_68_fa
     try:
         predictor_path = os.path.join(settings.BASE_DIR, 'files', 'shape_predictor_68_face_landmarks.dat')
         mmod_model_path = os.path.join(settings.BASE_DIR, 'files', 'mmod_human_face_detector.dat')
-        
-        # Read the image from the InMemoryUploadedFile
-        img_array = np.frombuffer(image_path.read(), np.uint8)
-        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-        if image is None:
-            raise ValueError("Error in image decoding. Please check the uploaded image.")
-
-        # Resize the image to reduce resource usage
-        max_height = 480  # Adjust based on your requirements
-        max_width = 640   # Adjust based on your requirements
-
-        height, width = image.shape[:2]
-        if height > max_height or width > max_width:
-            scale = min(max_width / width, max_height / height)
-            new_size = (int(width * scale), int(height * scale))
-            image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
-
+        image = _load_bgr_image(image_path)
         yaw, pitch, roll = get_right_head_pose(image, predictor_path, mmod_model_path)
         print(f"Yaw: {yaw:.2f}, Pitch: {pitch:.2f}, Roll: {roll:.2f}")
-
-        rotated_right = yaw > yaw_threshold
-        
-        return rotated_right
+        return yaw > yaw_threshold, yaw
     except Exception as e:
         raise ValueError(f"Error in head rotation detection: {str(e)}")
