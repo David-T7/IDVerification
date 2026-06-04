@@ -121,6 +121,15 @@ Stage **`kyc`** in main backend pipeline — after `ai_screening`, before `theor
 
 ---
 
+## Release readiness
+
+- [x] KYC stage in pipeline (`kyc` before theoretical tests)
+- [ ] Smoke test: passport + liveness → main backend `pipeline-stage` passed
+
+**Checklist:** `c:\toptal\Django Project\RELEASE_READINESS.md`
+
+---
+
 ## Related
 
 | Service | Role |
