@@ -124,7 +124,10 @@ Stage **`kyc`** in main backend pipeline — after `ai_screening`, before `theor
 ## Release readiness
 
 - [x] KYC stage in pipeline (`kyc` before theoretical tests)
+- [x] Liveness step 1 uploads surveillance reference (`LivelinessTest.js`)
 - [ ] Smoke test: passport + liveness → main backend `pipeline-stage` passed
+
+**2026-06-02 vetting batch:** No KYC code changes — see main `RELEASE_READINESS.md` for stack hub / hold / taxonomy flow after KYC.
 
 **Checklist:** `c:\toptal\Django Project\RELEASE_READINESS.md`
 
