@@ -26,7 +26,7 @@ Warmup endpoint preloads models: `GET /api/warmup/`
 
 `core.authentication.CustomJWTAuthentication` — Bearer JWT with shared **`SECRET_KEY`**.
 
-Candidate tokens use `user_id` = resume UUID. Requests include `freelancer_id` in multipart form (same UUID).
+Candidate tokens use `user_id` = resume UUID. `freelancer_id` is extracted server-side from the verified JWT payload — do **not** include it in the multipart form body.
 
 ---
 
@@ -43,7 +43,7 @@ Candidate tokens use `user_id` = resume UUID. Requests include `freelancer_id` i
 | POST | `/api/verify/head-rotation-left/` | Liveness step 4 |
 | POST | `/api/verify/update-user-image/` | Update stored ID face image |
 
-All verify endpoints expect `multipart/form-data` with `user_image` snapshot and `freelancer_id`.
+All verify endpoints expect `multipart/form-data` with `user_image` (and `full_name` where noted). `freelancer_id` is read from the JWT — do not include it in the form body.
 
 ---
 
@@ -109,7 +109,7 @@ app/
 
 - **400 on passport** — often empty `full_name` from frontend or unreadable MRZ; backend returns explicit error message.
 - **500 on verify** — usually unmigrated DB.
-- **`freelancer_id` must match JWT `user_id`** for candidates.
+- **`freelancer_id` is always the JWT `user_id`** — enforced server-side; sending it in the form body has no effect.
 - **DeepFace/model paths** — `DEEPFACE_HOME=/vol/web/deepface` in docker-compose.
 - **Never commit API keys** in docker-compose — use `app/.env`.
 
