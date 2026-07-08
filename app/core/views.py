@@ -41,8 +41,17 @@ from .utils import (
     _get_id_face_encoding,
 )
 
+import logging
+
 import tensorflow as tf
 from core.authentication import CustomJWTAuthentication, TokenPayloadPermission
+
+logger = logging.getLogger(__name__)
+
+
+def _freelancer_id(request):
+    """Return the candidate UUID from the verified JWT payload."""
+    return request.auth.get('user_id') if request.auth else None
 
 class VerifyIDView(APIView):
     """
@@ -56,8 +65,8 @@ class VerifyIDView(APIView):
         if serializer.is_valid():
             id_front_image = serializer.validated_data['front_id_image']
             id_back_image = serializer.validated_data['back_id_image']
-            freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-            full_name = request.data.get('full_name')  # Get freelancer UUID from the request
+            freelancer_id = _freelancer_id(request)
+            full_name = request.data.get('full_name')
 
             # Define paths and ensure directories exist
             id_front_upload_path = os.path.join(settings.MEDIA_ROOT, 'images/government_id', f"front_{id_front_image.name}")
@@ -119,10 +128,9 @@ class VerifyIDView(APIView):
 
                 # Calculate the similarity ratio using difflib
                 similarity_score = difflib.SequenceMatcher(None, normalized_ocr_name, normalized_request_name).ratio() * 100
-                name_match_threshold = 85  # Define the acceptable threshold for name matching
-                print("name similarity score is",similarity_score)
+                name_match_threshold = 85
                 if similarity_score < name_match_threshold:
-                    return Response({"error": "Full name does not much with the provided document!."}, status=status.HTTP_400_BAD_REQUEST)
+                    return Response({"error": "Full name does not match the provided document."}, status=status.HTTP_400_BAD_REQUEST)
 
                 # Personal Information Matching
                 match_score, total_fields, mismatches = match_personal_info(barcode_data_dict, ocr_data_dict)
@@ -150,7 +158,6 @@ class VerifyIDView(APIView):
                     authenticity_score += 1
                 
                 authenticity_percentage = (authenticity_score / total_features) * 100
-                print("Government id authenticity percnetage ",authenticity_percentage)
 
                 # Check if authenticity percentage is above the threshold
                 if authenticity_percentage >= 80:
@@ -188,8 +195,8 @@ class VerifyPassportView(APIView):
         serializer = PassportUploadSerializer(data=request.data)
         if serializer.is_valid():
             passport_image = serializer.validated_data['passport_image']
-            freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-            full_name = request.data.get('full_name')  # Get freelancer UUID from the request
+            freelancer_id = _freelancer_id(request)
+            full_name = request.data.get('full_name')
             # Define paths and ensure directories exist
             passport_image_upload_path = os.path.join(settings.MEDIA_ROOT, 'images/passport', f"{passport_image.name}")
             passport_template_path = os.path.join(settings.MEDIA_ROOT, 'images/passport',"passport_template.jpg")
@@ -234,7 +241,7 @@ class VerifyPassportView(APIView):
                         mrz_data.get('valid_expiration_date', False) and
                         mrz_data.get('valid_composite', False) and
                         mrz_data.get('valid_personal_number', False)):
-                    print("Warning: MRZ data failed validation checks.")
+                    logger.warning("MRZ data failed validation checks for freelancer %s", freelancer_id)
                 else:
                     authenticity_score += 1  # MRZ validation passed
 
@@ -253,21 +260,17 @@ class VerifyPassportView(APIView):
                 # Step 4: Fuzzy name comparison using difflib's SequenceMatcher
                 similarity_score = difflib.SequenceMatcher(None, normalized_full_name_request, normalized_mrz_names).ratio() * 100
                 name_match_threshold = 85  # Define the acceptable threshold for name matching
-                print("name similarity score is",similarity_score)
-                if similarity_score <  name_match_threshold:
-                    return Response({"error": "Full name does not much with the provided document!."}, status=status.HTTP_400_BAD_REQUEST)
+                if similarity_score < name_match_threshold:
+                    return Response({"error": "Full name does not match the provided document."}, status=status.HTTP_400_BAD_REQUEST)
 
                 # 3a. Error Level Analysis (ELA)
                 ela_tampered, ela_score = perform_ela(passport_image_upload_path, threshold=10)
                 if not ela_tampered:
                     authenticity_score += 1
-                print(f"ELA Tampered: {ela_tampered}, ELA Score: {ela_score:.2f}")
-
                 # 3b. Clone Detection
                 clone_detected, clone_count = clone_detection(passport_image_upload_path, visualize=False, distance_threshold=30, area_threshold=50)
                 if not clone_detected:
                     authenticity_score += 1
-                print(f"Clone Detected: {clone_detected}, Clone Count: {clone_count}")
 
                 # 3c. Deep Learning-Based Forgery Detection
                 is_forged, confidence_forgery = predict_forgery(model_forgery, passport_image_upload_path)
@@ -275,24 +278,19 @@ class VerifyPassportView(APIView):
                     authenticity_score += 1
                 else:
                     authenticity_score += confidence_forgery
-                print(f"Forgery Detected: {is_forged}, Confidence: {confidence_forgery:.2f}")
 
                 # 3d. Anomaly Detection with Autoencoder
                 is_anomaly, mse = detect_anomaly(autoencoder, passport_image_upload_path)
                 if not is_anomaly:
                     authenticity_score += 1
-                print(f"Anomaly Detected: {is_anomaly}, MSE: {mse:.4f}")
 
-                # Step 4: Barcode Reading and Verification
                 # Step 5: Template Detection (e.g., Hologram)
                 hologram_detected = detect_template(passport_image_upload_path, passport_template_path, threshold=0.8)
                 if hologram_detected:
                     authenticity_score += 1
-                print(f"Hologram Detected: {hologram_detected}")
 
                 # Step 6: Composite Scoring
                 authenticity_percentage = (authenticity_score / total_features) * 100
-                print("passport authenticity percnetage ",authenticity_percentage)
                 # Check if authenticity percentage is above the threshold
                 if authenticity_percentage >= 80:
                     # Store the user image and ID image in the database
@@ -327,9 +325,7 @@ class FaceMatchingView(APIView):
    
     def post(self, request, *args, **kwargs):
             user_image = request.FILES.get('user_image')
-            freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
-            print("freelancer image is ",user_image)
-            print("freelance id is",freelancer_id)
+            freelancer_id = _freelancer_id(request)
 
             if not freelancer_id:
                 return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -353,7 +349,6 @@ class FaceMatchingView(APIView):
                     known_encoding = load_face_encoding(user_image_instance.id_image)
                 unknown_encoding = load_face_encoding(new_user_image)
               
-                print("mtaching....")
                 match, distance = compare_faces(known_encoding, unknown_encoding)
 
                 if not match:
@@ -383,18 +378,17 @@ class SmileDetectionView(APIView):
 
     def post(self, request, *args, **kwargs):
             user_image = request.FILES.get('user_image')
-            freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
+            freelancer_id = _freelancer_id(request)
 
             if not freelancer_id:
-                return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
-            elif not user_image:
+                return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+            if not user_image:
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
 
             image_bytes = prepare_uploaded_image_bytes(user_image)
 
             try:
                 img = _load_bgr_image(image_bytes)
-                print(f"Image shape: {img.shape}")
                 emotion = detect_smile(img)
 
                 if emotion.lower() != 'happy':
@@ -403,7 +397,7 @@ class SmileDetectionView(APIView):
                 return Response({"status": "success", "message": "Smile detected successfully."}, status=status.HTTP_200_OK)
 
             except Exception as e:
-                print(f"Error during smile detection: {e}")
+                logger.exception("Smile detection error for %s", freelancer_id)
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 
@@ -414,10 +408,10 @@ class HeadRotationRightView(APIView):
 
     def post(self, request, *args, **kwargs):
             user_image = request.FILES.get('user_image')
-            freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
+            freelancer_id = _freelancer_id(request)
             if not freelancer_id:
-                return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
-            elif not user_image:
+                return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+            if not user_image:
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
 
             image_bytes = prepare_uploaded_image_bytes(user_image)
@@ -448,10 +442,10 @@ class HeadRotationLeftView(APIView):
 
     def post(self, request, *args, **kwargs):
             user_image = request.FILES.get('user_image')
-            freelancer_id = request.data.get('freelancer_id')  # Get freelancer UUID from the request
+            freelancer_id = _freelancer_id(request)
             if not freelancer_id:
-                return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
-            elif not user_image:
+                return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+            if not user_image:
                 return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
 
             image_bytes = prepare_uploaded_image_bytes(user_image)
@@ -481,11 +475,11 @@ class UpdateUserImageView(APIView):
     authentication_classes = [CustomJWTAuthentication]
 
     def patch(self, request, *args, **kwargs):
-        freelancer_id = request.data.get("freelancer_id")
+        freelancer_id = _freelancer_id(request)
         user_image = request.FILES.get("user_image")
 
         if not freelancer_id:
-            return Response({"error": "Freelancer UUID is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
         if not user_image:
             return Response({"error": "User image is required."}, status=status.HTTP_400_BAD_REQUEST)
 
